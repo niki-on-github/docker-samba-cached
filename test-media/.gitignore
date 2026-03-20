@@ -1,0 +1,8 @@
+# Test media files (add your own video files here)
+*.mkv
+*.mp4
+*.avi
+*.ts
+*.m4v
+*.mks
+!README.txt

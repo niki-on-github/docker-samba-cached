@@ -1,0 +1,11 @@
+services:
+  cache-manager:
+    build: .
+    container_name: cache-manager
+    environment:
+      - CACHE_WORK_DIR=/media
+    volumes:
+      - ./test-media:/media:ro
+    cap_add:
+      - SYS_ADMIN
+    restart: unless-stopped

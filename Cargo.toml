@@ -1,0 +1,16 @@
+[package]
+name = "cache-manager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nix = { version = "0.31", features = ["fanotify"] }
+clap = { version = "4", features = ["derive", "env"] }
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
