@@ -9,9 +9,11 @@ use tracing::{error, info, warn};
 
 const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "avi", "ts", "m4v", "mks"];
 const OPEN_TIMEOUT_MS: u64 = 500;
+const CACHE_COOLDOWN_MS: u64 = 30000;
 
 struct OpenTracker {
     pending: HashMap<PathBuf, Instant>,
+    recently_cached: HashMap<PathBuf, Instant>,
     timeout: Duration,
 }
 
@@ -19,21 +21,32 @@ impl OpenTracker {
     fn new(timeout_ms: u64) -> Self {
         Self {
             pending: HashMap::new(),
+            recently_cached: HashMap::new(),
             timeout: Duration::from_millis(timeout_ms),
         }
     }
 
+    fn cleanup_stale_cache_entries(&mut self) {
+        let cutoff = Instant::now() - Duration::from_millis(CACHE_COOLDOWN_MS);
+        self.recently_cached
+            .retain(|_, cached_at| *cached_at > cutoff);
+    }
+
     fn on_open(&mut self, path: PathBuf) {
-        self.pending.insert(path.clone(), Instant::now());
+        self.cleanup_stale_cache_entries();
+
+        if let Some(cached_at) = self.recently_cached.get(&path) {
+            let elapsed = Instant::now().duration_since(*cached_at);
+            if elapsed < Duration::from_millis(CACHE_COOLDOWN_MS) {
+                return;
+            }
+        }
+
+        self.pending.insert(path, Instant::now());
     }
 
     fn on_close(&mut self, path: &Path) {
-        if self.pending.remove(path).is_some() {
-            info!(
-                "[TRACKER] File closed before timeout, dropped: {}",
-                path.display()
-            );
-        }
+        self.pending.remove(path);
     }
 
     fn check_and_cache_timed_out(&mut self) {
@@ -47,7 +60,7 @@ impl OpenTracker {
 
         for path in &timed_out {
             self.pending.remove(path);
-            info!("[TRACKER] File timed out, caching: {}", path.display());
+            self.recently_cached.insert(path.clone(), Instant::now());
             cache_file(path);
         }
     }
@@ -165,11 +178,11 @@ fn run_inotify(watch_dir: &Path) {
         let primary_event = event.split(',').next().unwrap_or(event);
         match primary_event {
             "OPEN" => {
-                info!("[INOTIFY] File opened: {}", path.display());
+                //info!("[INOTIFY] File opened: {}", path.display());
                 tracker.on_open(path);
             }
             "CLOSE_NOWRITE" | "CLOSE_WRITE" => {
-                info!("[INOTIFY] File closed: {}", path.display());
+                //info!("[INOTIFY] File closed: {}", path.display());
                 tracker.on_close(&path);
             }
             _ => {

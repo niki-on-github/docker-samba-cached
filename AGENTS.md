@@ -15,11 +15,11 @@ Fanotify fails with `EINVAL` in Docker/Kubernetes containers due to overlay file
 **DO NOT attempt to use fanotify** - use inotify only.
 
 ### Implementation Details
-- Uses `inotifywait -e close_read` to detect completed video reads
-- `close_read` fires AFTER file is closed, so **do not check `is_file_still_open()`**
-- vmtouch is called immediately on `close_read` event
-- No cooldown mechanism - kernel page cache handles duplicates
-- No byte tracking - any video file read is cached (kernel handles partial reads)
+- Uses `inotifywait -e open -e close_write -e close_nowrite` to detect video file access
+- Files are tracked when opened; if still open after 500ms, they are cached via vmtouch
+- **30-second cooldown**: After caching, OPEN events for the same file are ignored for 30 seconds
+- vmtouch is called synchronously and blocks until caching completes
+- No byte tracking - entire file is cached (kernel handles partial reads)
 
 ## Build Commands
 
@@ -141,6 +141,13 @@ The application uses environment variables for configuration:
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `CACHE_WORK_DIR` | Directory to monitor for video files | Yes |
+
+### Cache Behavior
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `OPEN_TIMEOUT_MS` | 500 | Time a file must stay open before caching |
+| `CACHE_COOLDOWN_MS` | 30000 | Time before same file can be re-cached |
 
 ### Logging Configuration
 
