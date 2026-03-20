@@ -1,10 +1,11 @@
-FROM ghcr.io/crazy-max/samba:latest
+FROM ghcr.io/crazy-max/samba:4.21.4
 
-RUN apk --update --no-cache add \
+RUN apk add --no-cache \
     bash \
     inotify-tools \
-    vmtouch \
+    samba \
     tini \
+    vmtouch --repository=http://dl-cdn.alpinelinux.org/alpine/edge/testing \
     && rm -rf /tmp/*
 
 COPY rootfs/ /
