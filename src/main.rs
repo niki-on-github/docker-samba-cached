@@ -120,9 +120,11 @@ fn run_inotify(watch_dir: &Path) {
             "-e",
             "open",
             "-e",
-            "close",
+            "close_write",
+            "-e",
+            "close_nowrite",
             "--format",
-            "%w%f%n%e",
+            "%w%f|%e",
             "-r",
             watch_dir.to_str().unwrap(),
         ])
@@ -157,29 +159,62 @@ fn run_inotify(watch_dir: &Path) {
 
     let reader = std::io::BufReader::new(stdout);
 
+    let mut last_path: Option<PathBuf> = None;
+
     for line in reader.lines().map_while(Result::ok) {
-        info!("[INOTIFY] event: {}", line);
+        info!("[INOTIFY] raw: '{}'", line);
 
-        if let Some(null_pos) = line.find('\0') {
-            let path = PathBuf::from(line[..null_pos].trim_end_matches('/'));
-            let event = &line[null_pos + 1..];
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
 
-            if !is_video_file(&path) {
+        let (path, event) = if let Some(pipe_pos) = trimmed.find('|') {
+            let path = PathBuf::from(trimmed[..pipe_pos].trim_end_matches('/'));
+            let event = trimmed[pipe_pos + 1..].trim();
+            (path, event)
+        } else {
+            let path_str = trimmed.trim_end_matches('/');
+            if path_str.contains('/')
+                && !path_str.ends_with(".mkv")
+                && !path_str.ends_with(".mp4")
+                && !path_str.ends_with(".avi")
+                && !path_str.ends_with(".ts")
+                && !path_str.ends_with(".m4v")
+                && !path_str.ends_with(".mks")
+            {
+                last_path = Some(PathBuf::from(path_str));
+                info!("[INOTIFY] got path: {}", path_str);
+                continue;
+            } else if let Some(ref lp) = last_path {
+                (lp.clone(), path_str)
+            } else {
+                warn!("[INOTIFY] malformed line, no path: {}", trimmed);
                 continue;
             }
+        };
 
-            let mut tracker = tracker.lock().unwrap();
-            tracker.check_and_cache_timed_out();
+        info!("[INOTIFY] parsed: path={} event={}", path.display(), event);
 
-            match event {
-                "OPEN" => {
-                    info!("[INOTIFY] File opened: {}", path.display());
-                    tracker.on_open(path);
-                }
-                "CLOSE_NOWRITE" | "CLOSE_WRITE" => {
-                    tracker.on_close(&path);
-                }
-                _ => {}
+        if !is_video_file(&path) {
+            continue;
+        }
+
+        let mut tracker = tracker.lock().unwrap();
+        tracker.check_and_cache_timed_out();
+
+        let primary_event = event.split(',').next().unwrap_or(event);
+        match primary_event {
+            "OPEN" => {
+                info!("[INOTIFY] File opened: {}", path.display());
+                tracker.on_open(path);
+            }
+            "CLOSE_NOWRITE" | "CLOSE_WRITE" => {
+                info!("[INOTIFY] File closed: {}", path.display());
+                tracker.on_close(&path);
+            }
+            _ => {
+                warn!("[INOTIFY] Unknown event: {}", event);
             }
         }
     }
