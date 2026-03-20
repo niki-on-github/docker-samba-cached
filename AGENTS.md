@@ -24,7 +24,7 @@ nix develop -c cargo check
 nix develop -c cargo build
 nix develop -c cargo build --release
 nix develop -c cargo test
-nix develop -c cargo run -- --cache-work-dir /path/to/media
+RUST_LOG=info nix develop -c cargo run
 ```
 
 ### Docker Build
@@ -120,10 +120,17 @@ let value = some_operation().map_err(|e| format!("Failed: {}", e))?;
 | Crate | Version | Purpose |
 |-------|---------|---------|
 | nix | 0.31 (fanotify feature) | Linux fanotify API bindings |
-| clap | 4 | CLI argument parsing with env var support |
 | parking_lot | 0.12 | Fast mutex implementation |
 | tracing | 0.1 | Structured logging |
 | tracing-subscriber | 0.3 | Log output formatting |
+
+### Configuration
+
+The application uses environment variables for configuration:
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `CACHE_WORK_DIR` | Directory to monitor for video files | Yes |
 
 ## Testing
 

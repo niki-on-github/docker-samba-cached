@@ -1,6 +1,6 @@
-use clap::Parser;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -10,13 +10,6 @@ use tracing::{debug, error, info, warn};
 const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "avi", "ts", "m4v", "mks"];
 const COOLDOWN_SECS: u64 = 30;
 const WATCH_DELAY_MS: u64 = 1000;
-
-#[derive(Parser, Debug)]
-#[command(author, version, about)]
-struct Args {
-    #[arg(long, env = "CACHE_WORK_DIR")]
-    cache_work_dir: PathBuf,
-}
 
 struct CooldownEntry {
     last_triggered: Instant,
@@ -104,13 +97,86 @@ fn try_fanotify(watch_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Failed to mark fanotify: {}", e))?;
 
     info!("Using fanotify for file monitoring");
-    return Ok(());
+    Ok(())
 }
 
-fn run_inotify(
-    watch_dir: &Path,
-    cooldown_map: parking_lot::Mutex<HashMap<PathBuf, CooldownEntry>>,
-) {
+fn run_fanotify_loop(
+    watch_dir: PathBuf,
+    cooldown_map: Mutex<HashMap<PathBuf, CooldownEntry>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use nix::sys::fanotify::{EventFFlags, Fanotify, InitFlags, MaskFlags};
+    use std::os::fd::AsRawFd;
+
+    let watch_dir_fd =
+        std::fs::File::open(&watch_dir).map_err(|e| format!("Failed to open watch dir: {}", e))?;
+
+    let fanotify_fd = Fanotify::init(
+        InitFlags::FAN_NONBLOCK | InitFlags::FAN_CLOEXEC,
+        EventFFlags::empty(),
+    )?;
+
+    fanotify_fd.mark(
+        nix::sys::fanotify::MarkFlags::FAN_MARK_MOUNT,
+        MaskFlags::FAN_OPEN,
+        &watch_dir_fd,
+        None::<&Path>,
+    )?;
+
+    info!("Fanotify monitoring active");
+
+    loop {
+        let events = match fanotify_fd.read_events() {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("Error reading fanotify event: {}", e);
+                continue;
+            }
+        };
+
+        for event in events {
+            let fd = match event.fd() {
+                Some(fd) => fd,
+                None => continue,
+            };
+
+            let path = match std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            debug!("Open event: {}", path.display());
+
+            if !is_video_file(&path) {
+                continue;
+            }
+
+            let mut cooldown = cooldown_map.lock();
+            if let Some(entry) = cooldown.get(&path) {
+                if entry.last_triggered.elapsed() < Duration::from_secs(COOLDOWN_SECS) {
+                    debug!("In cooldown, skipping: {}", path.display());
+                    continue;
+                }
+            }
+
+            cooldown.insert(
+                path.clone(),
+                CooldownEntry {
+                    last_triggered: Instant::now(),
+                },
+            );
+
+            if cooldown.len() > 100 {
+                cooldown.retain(|_, v| v.last_triggered.elapsed() < Duration::from_secs(60));
+            }
+
+            drop(cooldown);
+
+            cache_file(path);
+        }
+    }
+}
+
+fn run_inotify(watch_dir: &Path, cooldown_map: Mutex<HashMap<PathBuf, CooldownEntry>>) {
     use std::io::BufRead;
     use std::process::{Command, Stdio};
 
@@ -166,7 +232,7 @@ fn run_inotify(
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -174,11 +240,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let args = Args::parse();
+    let watch_dir = match env::var("CACHE_WORK_DIR") {
+        Ok(dir) => {
+            info!("CACHE_WORK_DIR: {}", dir);
+            PathBuf::from(dir)
+        }
+        Err(_) => {
+            error!("CACHE_WORK_DIR environment variable not set");
+            thread::sleep(Duration::from_secs(60));
+            std::process::exit(1);
+        }
+    };
 
-    let watch_dir = args.cache_work_dir;
     if !watch_dir.exists() {
         error!("CACHE_WORK_DIR does not exist: {}", watch_dir.display());
+        thread::sleep(Duration::from_secs(60));
         std::process::exit(1);
     }
 
@@ -187,13 +263,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cooldown_map: Mutex<HashMap<PathBuf, CooldownEntry>> = Mutex::new(HashMap::new());
 
-    if let Err(e) = try_fanotify(&watch_dir) {
-        warn!("Fanotify not available ({}), falling back to inotify", e);
-    } else {
-        info!("Fanotify initialized successfully");
+    match try_fanotify(&watch_dir) {
+        Ok(_) => {
+            if let Err(e) = run_fanotify_loop(watch_dir, cooldown_map) {
+                error!("Fanotify loop error: {}", e);
+            }
+        }
+        Err(e) => {
+            warn!("Fanotify not available ({}), falling back to inotify", e);
+            run_inotify(&watch_dir, cooldown_map);
+        }
     }
-
-    run_inotify(&watch_dir, cooldown_map);
-
-    Ok(())
 }

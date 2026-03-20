@@ -1,2 +1,2 @@
 #!/usr/bin/with-contenv bash
-exec s6-setuidgid root /usr/local/bin/cache-manager
+exec s6-setuidgid root env /usr/local/bin/cache-manager
