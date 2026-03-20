@@ -117,10 +117,9 @@ let value = some_operation().map_err(|e| format!("Failed: {}", e))?;
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| nix | 0.31 | Linux syscall bindings (unused, kept for future) |
 | parking_lot | 0.12 | Fast mutex implementation |
 | tracing | 0.1 | Structured logging |
-| tracing-subscriber | 0.3 | Log output formatting |
+| tracing-subscriber | 0.3 | Log output formatting | |
 
 ### Configuration
 

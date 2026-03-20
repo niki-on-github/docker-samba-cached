@@ -1,19 +1,12 @@
-use parking_lot::Mutex;
-use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "avi", "ts", "m4v", "mks"];
-const COOLDOWN_SECS: u64 = 30;
 const WATCH_DELAY_MS: u64 = 1000;
-
-struct CooldownEntry {
-    last_triggered: Instant,
-}
 
 fn is_video_file(path: &Path) -> bool {
     path.extension()
@@ -49,7 +42,7 @@ fn cache_file(path: PathBuf) {
 
         if !is_file_still_open(&path_clone) {
             debug!(
-                "File no longer open, skipping cache: {}",
+                "[CACHE] File no longer open, skipping: {}",
                 path_clone.display()
             );
             return;
@@ -57,7 +50,7 @@ fn cache_file(path: PathBuf) {
 
         if !path_clone.exists() {
             debug!(
-                "File no longer exists, skipping cache: {}",
+                "[CACHE] File no longer exists, skipping: {}",
                 path_clone.display()
             );
             return;
@@ -70,16 +63,16 @@ fn cache_file(path: PathBuf) {
             .arg(path_clone.as_os_str())
             .spawn()
         {
-            warn!("Failed to spawn vmtouch: {}", e);
+            warn!("[CACHE] Failed to spawn vmtouch: {}", e);
         }
     });
 }
 
-fn run_inotify(watch_dir: &Path, cooldown_map: Mutex<HashMap<PathBuf, CooldownEntry>>) {
+fn run_inotify(watch_dir: &Path) {
     use std::io::BufRead;
     use std::process::{Command, Stdio};
 
-    info!("Starting inotify monitoring on: {}", watch_dir.display());
+    info!("[INOTIFY] Starting monitoring on: {}", watch_dir.display());
 
     let mut child = Command::new("inotifywait")
         .args([
@@ -94,17 +87,20 @@ fn run_inotify(watch_dir: &Path, cooldown_map: Mutex<HashMap<PathBuf, CooldownEn
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("Failed to start inotifywait");
+        .expect("[INOTIFY] Failed to start inotifywait");
 
-    let stdout = child.stdout.take().expect("Failed to capture stdout");
+    let stdout = child
+        .stdout
+        .take()
+        .expect("[INOTIFY] Failed to capture stdout");
     let stderr = child.stderr.take();
 
-    let stderr_handle = thread::spawn(move || {
+    let _stderr_handle = thread::spawn(move || {
         if let Some(stderr) = stderr {
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
                 if !line.is_empty() {
-                    debug!("inotifywait: {}", line);
+                    debug!("[INOTIFY] stderr: {}", line);
                 }
             }
         }
@@ -115,40 +111,13 @@ fn run_inotify(watch_dir: &Path, cooldown_map: Mutex<HashMap<PathBuf, CooldownEn
     for line in reader.lines().map_while(Result::ok) {
         let path = PathBuf::from(&line);
 
-        debug!("[INOTIFY] Open event: {}", path.display());
-
         if !is_video_file(&path) {
-            debug!("[INOTIFY] Skipping non-video file: {}", path.display());
             continue;
         }
 
-        let mut cooldown = cooldown_map.lock();
-        if let Some(entry) = cooldown.get(&path) {
-            if entry.last_triggered.elapsed() < Duration::from_secs(COOLDOWN_SECS) {
-                debug!("[INOTIFY] In cooldown, skipping: {}", path.display());
-                continue;
-            }
-        }
-
-        cooldown.insert(
-            path.clone(),
-            CooldownEntry {
-                last_triggered: Instant::now(),
-            },
-        );
-
-        if cooldown.len() > 100 {
-            cooldown.retain(|_, v| v.last_triggered.elapsed() < Duration::from_secs(60));
-        }
-
-        let file_to_cache = path.clone();
-        drop(cooldown);
-
-        info!("[INOTIFY] Video file opened: {}", file_to_cache.display());
-        cache_file(file_to_cache);
+        debug!("[INOTIFY] Video file read: {}", path.display());
+        cache_file(path);
     }
-
-    let _ = stderr_handle.join();
 }
 
 fn main() {
@@ -161,26 +130,27 @@ fn main() {
 
     let watch_dir = match env::var("CACHE_WORK_DIR") {
         Ok(dir) => {
-            info!("CACHE_WORK_DIR: {}", dir);
+            info!("[CONFIG] CACHE_WORK_DIR: {}", dir);
             PathBuf::from(dir)
         }
         Err(_) => {
-            error!("CACHE_WORK_DIR environment variable not set");
+            error!("[CONFIG] CACHE_WORK_DIR environment variable not set");
             thread::sleep(Duration::from_secs(60));
             std::process::exit(1);
         }
     };
 
     if !watch_dir.exists() {
-        error!("CACHE_WORK_DIR does not exist: {}", watch_dir.display());
+        error!(
+            "[CONFIG] CACHE_WORK_DIR does not exist: {}",
+            watch_dir.display()
+        );
         thread::sleep(Duration::from_secs(60));
         std::process::exit(1);
     }
 
-    info!("Starting Media RAM Cacher");
-    info!("Watching: {}", watch_dir.display());
+    info!("[MAIN] Starting Media RAM Cacher");
+    info!("[MAIN] Watching: {}", watch_dir.display());
 
-    let cooldown_map: Mutex<HashMap<PathBuf, CooldownEntry>> = Mutex::new(HashMap::new());
-
-    run_inotify(&watch_dir, cooldown_map);
+    run_inotify(&watch_dir);
 }
