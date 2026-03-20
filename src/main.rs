@@ -25,7 +25,7 @@ impl OpenTracker {
 
     fn on_open(&mut self, path: PathBuf) {
         if !path.exists() {
-            debug!(
+            info!(
                 "[TRACKER] Ignoring open for non-existent file: {}",
                 path.display()
             );
@@ -74,7 +74,7 @@ fn cache_file(path: PathBuf) {
 
     thread::spawn(move || {
         if !path_clone.exists() {
-            debug!(
+            info!(
                 "[CACHE] File no longer exists, skipping: {}",
                 path_clone.display()
             );
@@ -83,12 +83,25 @@ fn cache_file(path: PathBuf) {
 
         info!("[CACHE] Loading: {}", path_clone.display());
 
-        if let Err(e) = Command::new("vmtouch")
+        match Command::new("vmtouch")
             .arg("-t")
             .arg(path_clone.as_os_str())
-            .spawn()
+            .output()
         {
-            warn!("[CACHE] Failed to spawn vmtouch: {}", e);
+            Ok(output) => {
+                if output.status.success() {
+                    info!(
+                        "[CACHE] vmtouch: {}",
+                        String::from_utf8_lossy(&output.stdout).trim()
+                    );
+                } else {
+                    warn!(
+                        "[CACHE] vmtouch failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                }
+            }
+            Err(e) => warn!("[CACHE] Failed to run vmtouch: {}", e),
         }
     });
 }
