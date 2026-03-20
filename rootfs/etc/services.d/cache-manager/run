@@ -11,15 +11,15 @@ MAX_CACHE_FILES=${MAX_CACHE_FILES:-2}
 # Array to keep track of the LRU queue
 declare -a CACHED_FILES
 
-echo "Starting File RAM Cacher..."
+echo "Starting File RAM Cacher on $CACHE_WATCH_DIR..."
 
-# Listen for 'open' events on files
-inotifywait -m -e open --format "%w%f" -r "$CACHE_WATCH_DIR" | while read -r FILE
+# Use process substitution < <(...) to avoid subshell variable issues
+while read -r FILE
 do
-    # Only react to video files to ignore tiny metadata files
+    # Only react to video files
     if [[ "$FILE" =~ \.(mkv|mp4|avi)$ ]]; then
         
-        # Check if the file is already in our cache list (debounce)
+        # Check if already in queue
         ALREADY_CACHED=0
         for cached in "${CACHED_FILES[@]}"; do
             if [[ "$cached" == "$FILE" ]]; then
@@ -29,26 +29,21 @@ do
         done
 
         if [[ $ALREADY_CACHED -eq 0 ]]; then
-            echo "New File opened: $FILE"
-            
-            # 1. Force the file into RAM in the background
-            vmtouch -t "$FILE" &
-
-            # 2. Add to our queue
+            # IMPORTANT: Add to array BEFORE running vmtouch to prevent recursion loop
             CACHED_FILES+=("$FILE")
+            echo "New File detected: $FILE. Caching..."
             
-            # 3. LRU Eviction: If we have more than MAX_CACHE_FILES
+            # Cache in background
+            vmtouch -t "$FILE" > /dev/null 2>&1 &
+
+            # LRU Eviction Logic
             if [[ ${#CACHED_FILES[@]} -gt $MAX_CACHE_FILES ]]; then
-                # Get the oldest file (index 0)
                 OLDEST_FILE="${CACHED_FILES[0]}"
-                echo "Cache full. Evicting oldest file from RAM: $OLDEST_FILE"
-                
-                # Forcefully evict the oldest file from RAM (-e)
-                vmtouch -e "$OLDEST_FILE"
-                
-                # Remove oldest file from the array
+                echo "Cache full. Evicting: $OLDEST_FILE"
+                vmtouch -e "$OLDEST_FILE" > /dev/null 2>&1
                 CACHED_FILES=("${CACHED_FILES[@]:1}")
             fi
         fi
     fi
-done
+# Note the syntax change here to fix the subshell issue:
+done < <(inotifywait -m -e open --format "%w%f" -r "$CACHE_WATCH_DIR")
