@@ -11,7 +11,7 @@ MAX_CACHE_FILES=${MAX_CACHE_FILES:-2}
 # Array to keep track of the LRU queue
 declare -a CACHED_FILES
 
-echo "Starting Media RAM Cacher..."
+echo "Starting File RAM Cacher..."
 
 # Listen for 'open' events on files
 inotifywait -m -e open --format "%w%f" -r "$WATCH_DIR" | while read -r FILE
@@ -29,7 +29,7 @@ do
         done
 
         if [[ $ALREADY_CACHED -eq 0 ]]; then
-            echo "New video opened: $FILE"
+            echo "New File opened: $FILE"
             
             # 1. Force the file into RAM in the background
             # -t touches it into memory, -b runs it in background so script doesn't hang
