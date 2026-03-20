@@ -5,7 +5,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "avi", "ts", "m4v", "mks"];
 const OPEN_TIMEOUT_MS: u64 = 500;
@@ -24,16 +24,7 @@ impl OpenTracker {
     }
 
     fn on_open(&mut self, path: PathBuf) {
-        if !path.exists() {
-            info!(
-                "[TRACKER] Ignoring open for non-existent file: {}",
-                path.display()
-            );
-            return;
-        }
-
         self.pending.insert(path.clone(), Instant::now());
-        debug!("[TRACKER] File opened (timer started): {}", path.display());
     }
 
     fn on_close(&mut self, path: &Path) {
@@ -57,7 +48,7 @@ impl OpenTracker {
         for path in &timed_out {
             self.pending.remove(path);
             info!("[TRACKER] File timed out, caching: {}", path.display());
-            cache_file(path.clone());
+            cache_file(path);
         }
     }
 }
@@ -69,41 +60,29 @@ fn is_video_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn cache_file(path: PathBuf) {
-    let path_clone = path.clone();
+fn cache_file(path: &Path) {
+    info!("[CACHE] Loading: {}", path.display());
 
-    thread::spawn(move || {
-        if !path_clone.exists() {
-            info!(
-                "[CACHE] File no longer exists, skipping: {}",
-                path_clone.display()
-            );
-            return;
-        }
-
-        info!("[CACHE] Loading: {}", path_clone.display());
-
-        match Command::new("vmtouch")
-            .arg("-t")
-            .arg(path_clone.as_os_str())
-            .output()
-        {
-            Ok(output) => {
-                if output.status.success() {
-                    info!(
-                        "[CACHE] vmtouch: {}",
-                        String::from_utf8_lossy(&output.stdout).trim()
-                    );
-                } else {
-                    warn!(
-                        "[CACHE] vmtouch failed: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    );
-                }
+    match Command::new("vmtouch")
+        .arg("-t")
+        .arg(path.as_os_str())
+        .output()
+    {
+        Ok(output) => {
+            if output.status.success() {
+                info!(
+                    "[CACHE] vmtouch: {}",
+                    String::from_utf8_lossy(&output.stdout).trim()
+                );
+            } else {
+                warn!(
+                    "[CACHE] vmtouch failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
             }
-            Err(e) => warn!("[CACHE] Failed to run vmtouch: {}", e),
         }
-    });
+        Err(e) => warn!("[CACHE] Failed to run vmtouch: {}", e),
+    }
 }
 
 fn run_inotify(watch_dir: &Path) {
@@ -159,49 +138,29 @@ fn run_inotify(watch_dir: &Path) {
 
     let reader = std::io::BufReader::new(stdout);
 
-    let mut last_path: Option<PathBuf> = None;
-
     for line in reader.lines().map_while(Result::ok) {
-        info!("[INOTIFY] raw: '{}'", line);
-
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        let (path, event) = if let Some(pipe_pos) = trimmed.find('|') {
-            let path = PathBuf::from(trimmed[..pipe_pos].trim_end_matches('/'));
-            let event = trimmed[pipe_pos + 1..].trim();
-            (path, event)
-        } else {
-            let path_str = trimmed.trim_end_matches('/');
-            if path_str.contains('/')
-                && !path_str.ends_with(".mkv")
-                && !path_str.ends_with(".mp4")
-                && !path_str.ends_with(".avi")
-                && !path_str.ends_with(".ts")
-                && !path_str.ends_with(".m4v")
-                && !path_str.ends_with(".mks")
-            {
-                last_path = Some(PathBuf::from(path_str));
-                info!("[INOTIFY] got path: {}", path_str);
-                continue;
-            } else if let Some(ref lp) = last_path {
-                (lp.clone(), path_str)
-            } else {
-                warn!("[INOTIFY] malformed line, no path: {}", trimmed);
+        let (path, event) = match trimmed.find('|') {
+            Some(pipe_pos) => {
+                let path = PathBuf::from(trimmed[..pipe_pos].trim_end_matches('/'));
+                let event = trimmed[pipe_pos + 1..].trim();
+                (path, event)
+            }
+            None => {
+                warn!("[INOTIFY] malformed line (no | separator): {}", trimmed);
                 continue;
             }
         };
-
-        info!("[INOTIFY] parsed: path={} event={}", path.display(), event);
 
         if !is_video_file(&path) {
             continue;
         }
 
         let mut tracker = tracker.lock().unwrap();
-        tracker.check_and_cache_timed_out();
 
         let primary_event = event.split(',').next().unwrap_or(event);
         match primary_event {
