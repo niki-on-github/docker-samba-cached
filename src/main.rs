@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "avi", "ts", "m4v", "mks"];
-const OPEN_TIMEOUT_MS: u64 = 1000;
+const OPEN_TIMEOUT_MS: u64 = 500;
 
 struct OpenTracker {
     pending: HashMap<PathBuf, Instant>,
@@ -122,7 +122,7 @@ fn run_inotify(watch_dir: &Path) {
             "-e",
             "close",
             "--format",
-            "%w%f %e",
+            "%w%f%n%e",
             "-r",
             watch_dir.to_str().unwrap(),
         ])
@@ -142,7 +142,7 @@ fn run_inotify(watch_dir: &Path) {
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
                 if !line.is_empty() {
-                    debug!("[INOTIFY] stderr: {}", line);
+                    info!("[INOTIFY] stderr: {}", line);
                 }
             }
         }
@@ -158,31 +158,29 @@ fn run_inotify(watch_dir: &Path) {
     let reader = std::io::BufReader::new(stdout);
 
     for line in reader.lines().map_while(Result::ok) {
-        let parts: Vec<&str> = line.splitn(2, ' ').collect();
-        if parts.len() < 2 {
-            continue;
-        }
+        info!("[INOTIFY] event: {}", line);
 
-        let path = PathBuf::from(parts[0].trim_end_matches('/'));
-        let event = parts[1];
+        if let Some(null_pos) = line.find('\0') {
+            let path = PathBuf::from(line[..null_pos].trim_end_matches('/'));
+            let event = &line[null_pos + 1..];
 
-        if !is_video_file(&path) {
-            continue;
-        }
-
-        let mut tracker = tracker.lock().unwrap();
-
-        tracker.check_and_cache_timed_out();
-
-        match event {
-            "OPEN" => {
-                info!("[INOTIFY] File opened: {}", path.display());
-                tracker.on_open(path);
+            if !is_video_file(&path) {
+                continue;
             }
-            "CLOSE_NOWRITE" | "CLOSE_WRITE" => {
-                tracker.on_close(&path);
+
+            let mut tracker = tracker.lock().unwrap();
+            tracker.check_and_cache_timed_out();
+
+            match event {
+                "OPEN" => {
+                    info!("[INOTIFY] File opened: {}", path.display());
+                    tracker.on_open(path);
+                }
+                "CLOSE_NOWRITE" | "CLOSE_WRITE" => {
+                    tracker.on_close(&path);
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 
