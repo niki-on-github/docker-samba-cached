@@ -38,27 +38,27 @@ impl OpenTracker {
 
     fn on_close(&mut self, path: &Path) {
         if self.pending.remove(path).is_some() {
-            debug!(
-                "[TRACKER] File closed (timer cancelled): {}",
+            info!(
+                "[TRACKER] File closed before timeout, dropped: {}",
                 path.display()
             );
         }
     }
 
-    fn get_timed_out(&mut self) -> Vec<PathBuf> {
+    fn check_and_cache_timed_out(&mut self) {
         let now = Instant::now();
-        let mut ready = Vec::new();
+        let timed_out: Vec<PathBuf> = self
+            .pending
+            .iter()
+            .filter(|(_, started)| now.duration_since(**started) >= self.timeout)
+            .map(|(path, _)| path.clone())
+            .collect();
 
-        self.pending.retain(|path, started| {
-            if now.duration_since(*started) >= self.timeout {
-                ready.push(path.clone());
-                false
-            } else {
-                true
-            }
-        });
-
-        ready
+        for path in &timed_out {
+            self.pending.remove(path);
+            info!("[TRACKER] File timed out, caching: {}", path.display());
+            cache_file(path.clone());
+        }
     }
 }
 
@@ -138,14 +138,8 @@ fn run_inotify(watch_dir: &Path) {
     let tracker_clone = Arc::clone(&tracker);
     let check_handle = thread::spawn(move || loop {
         thread::sleep(Duration::from_millis(100));
-
         let mut tracker = tracker_clone.lock().unwrap();
-        let timed_out = tracker.get_timed_out();
-        drop(tracker);
-
-        for path in timed_out {
-            cache_file(path);
-        }
+        tracker.check_and_cache_timed_out();
     });
 
     let reader = std::io::BufReader::new(stdout);
@@ -165,16 +159,15 @@ fn run_inotify(watch_dir: &Path) {
 
         let mut tracker = tracker.lock().unwrap();
 
+        tracker.check_and_cache_timed_out();
+
         match event {
             "OPEN" => {
-                let path_for_debug = path.clone();
+                info!("[INOTIFY] File opened: {}", path.display());
                 tracker.on_open(path);
-                debug!("[INOTIFY] Event: {} - {}", event, path_for_debug.display());
             }
             "CLOSE_NOWRITE" | "CLOSE_WRITE" => {
-                let path_for_debug = path.clone();
                 tracker.on_close(&path);
-                debug!("[INOTIFY] Event: {} - {}", event, path_for_debug.display());
             }
             _ => {}
         }
