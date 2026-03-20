@@ -75,112 +75,11 @@ fn cache_file(path: PathBuf) {
     });
 }
 
-fn try_fanotify(watch_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    use nix::sys::fanotify::{EventFFlags, Fanotify, InitFlags, MarkFlags, MaskFlags};
-
-    let watch_dir_fd =
-        std::fs::File::open(watch_dir).map_err(|e| format!("Failed to open watch dir: {}", e))?;
-
-    let fanotify_fd = Fanotify::init(
-        InitFlags::FAN_NONBLOCK | InitFlags::FAN_CLOEXEC,
-        EventFFlags::empty(),
-    )
-    .map_err(|e| format!("Failed to initialize fanotify: {}", e))?;
-
-    fanotify_fd
-        .mark(
-            MarkFlags::FAN_MARK_MOUNT,
-            MaskFlags::FAN_OPEN,
-            &watch_dir_fd,
-            None::<&Path>,
-        )
-        .map_err(|e| format!("Failed to mark fanotify: {}", e))?;
-
-    info!("Using fanotify for file monitoring");
-    Ok(())
-}
-
-fn run_fanotify_loop(
-    watch_dir: PathBuf,
-    cooldown_map: Mutex<HashMap<PathBuf, CooldownEntry>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use nix::sys::fanotify::{EventFFlags, Fanotify, InitFlags, MaskFlags};
-    use std::os::fd::AsRawFd;
-
-    let watch_dir_fd =
-        std::fs::File::open(&watch_dir).map_err(|e| format!("Failed to open watch dir: {}", e))?;
-
-    let fanotify_fd = Fanotify::init(
-        InitFlags::FAN_NONBLOCK | InitFlags::FAN_CLOEXEC,
-        EventFFlags::empty(),
-    )?;
-
-    fanotify_fd.mark(
-        nix::sys::fanotify::MarkFlags::FAN_MARK_MOUNT,
-        MaskFlags::FAN_OPEN,
-        &watch_dir_fd,
-        None::<&Path>,
-    )?;
-
-    info!("Fanotify monitoring active");
-
-    loop {
-        let events = match fanotify_fd.read_events() {
-            Ok(e) => e,
-            Err(e) => {
-                warn!("Error reading fanotify event: {}", e);
-                continue;
-            }
-        };
-
-        for event in events {
-            let fd = match event.fd() {
-                Some(fd) => fd,
-                None => continue,
-            };
-
-            let path = match std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            debug!("Open event: {}", path.display());
-
-            if !is_video_file(&path) {
-                continue;
-            }
-
-            let mut cooldown = cooldown_map.lock();
-            if let Some(entry) = cooldown.get(&path) {
-                if entry.last_triggered.elapsed() < Duration::from_secs(COOLDOWN_SECS) {
-                    debug!("In cooldown, skipping: {}", path.display());
-                    continue;
-                }
-            }
-
-            cooldown.insert(
-                path.clone(),
-                CooldownEntry {
-                    last_triggered: Instant::now(),
-                },
-            );
-
-            if cooldown.len() > 100 {
-                cooldown.retain(|_, v| v.last_triggered.elapsed() < Duration::from_secs(60));
-            }
-
-            drop(cooldown);
-
-            cache_file(path);
-        }
-    }
-}
-
 fn run_inotify(watch_dir: &Path, cooldown_map: Mutex<HashMap<PathBuf, CooldownEntry>>) {
     use std::io::BufRead;
     use std::process::{Command, Stdio};
 
-    info!("Using inotify for file monitoring");
+    info!("Starting inotify monitoring on: {}", watch_dir.display());
 
     let mut child = Command::new("inotifywait")
         .args([
@@ -193,24 +92,40 @@ fn run_inotify(watch_dir: &Path, cooldown_map: Mutex<HashMap<PathBuf, CooldownEn
             watch_dir.to_str().unwrap(),
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("Failed to start inotifywait");
 
     let stdout = child.stdout.take().expect("Failed to capture stdout");
+    let stderr = child.stderr.take();
+
+    let stderr_handle = thread::spawn(move || {
+        if let Some(stderr) = stderr {
+            let reader = std::io::BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                if !line.is_empty() {
+                    debug!("inotifywait: {}", line);
+                }
+            }
+        }
+    });
+
     let reader = std::io::BufReader::new(stdout);
 
     for line in reader.lines().map_while(Result::ok) {
         let path = PathBuf::from(&line);
 
+        debug!("[INOTIFY] Open event: {}", path.display());
+
         if !is_video_file(&path) {
+            debug!("[INOTIFY] Skipping non-video file: {}", path.display());
             continue;
         }
 
         let mut cooldown = cooldown_map.lock();
         if let Some(entry) = cooldown.get(&path) {
             if entry.last_triggered.elapsed() < Duration::from_secs(COOLDOWN_SECS) {
-                debug!("In cooldown, skipping: {}", path.display());
+                debug!("[INOTIFY] In cooldown, skipping: {}", path.display());
                 continue;
             }
         }
@@ -226,17 +141,21 @@ fn run_inotify(watch_dir: &Path, cooldown_map: Mutex<HashMap<PathBuf, CooldownEn
             cooldown.retain(|_, v| v.last_triggered.elapsed() < Duration::from_secs(60));
         }
 
+        let file_to_cache = path.clone();
         drop(cooldown);
 
-        cache_file(path);
+        info!("[INOTIFY] Video file opened: {}", file_to_cache.display());
+        cache_file(file_to_cache);
     }
+
+    let _ = stderr_handle.join();
 }
 
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
+                .add_directive(tracing::Level::DEBUG.into()),
         )
         .init();
 
@@ -263,15 +182,5 @@ fn main() {
 
     let cooldown_map: Mutex<HashMap<PathBuf, CooldownEntry>> = Mutex::new(HashMap::new());
 
-    match try_fanotify(&watch_dir) {
-        Ok(_) => {
-            if let Err(e) = run_fanotify_loop(watch_dir, cooldown_map) {
-                error!("Fanotify loop error: {}", e);
-            }
-        }
-        Err(e) => {
-            warn!("Fanotify not available ({}), falling back to inotify", e);
-            run_inotify(&watch_dir, cooldown_map);
-        }
-    }
+    run_inotify(&watch_dir, cooldown_map);
 }

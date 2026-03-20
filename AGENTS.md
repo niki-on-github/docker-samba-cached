@@ -1,11 +1,11 @@
 # Agent Instructions for cache-manager
 
-This repository contains a Rust-based media RAM cache manager that uses fanotify to monitor file access and vmtouch to preload video files into memory.
+This repository contains a Rust-based media RAM cache manager that uses inotify to monitor file access and vmtouch to preload video files into memory.
 
 ## Project Overview
 
 - **Language**: Rust 2021 edition
-- **Platform**: Linux-only (fanotify API)
+- **Platform**: Linux-only (inotify API)
 - **Binary**: Static musl build for Alpine Linux/Docker
 
 ## Build Commands
@@ -24,7 +24,7 @@ nix develop -c cargo check
 nix develop -c cargo build
 nix develop -c cargo build --release
 nix develop -c cargo test
-RUST_LOG=info nix develop -c cargo run
+nix develop -c cargo run
 ```
 
 ### Docker Build
@@ -40,7 +40,7 @@ cargo check          # Type-check without building
 cargo build          # Debug build
 cargo build --release # Optimized release build
 cargo test           # Run tests
-cargo run -- <args>  # Run with arguments
+cargo run            # Run with default settings
 ```
 
 ## Code Style Guidelines
@@ -53,12 +53,10 @@ cargo run -- <args>  # Run with arguments
 
 ### Imports
 - Group imports by crate: std → external → local
-- Use absolute paths for clarity in fanotify bindings
 - Example:
 ```rust
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use nix::sys::fanotify::{Fanotify, InitFlags, MarkFlags, MaskFlags};
 use parking_lot::Mutex;
 use tracing::{debug, error, info, warn};
 ```
@@ -119,7 +117,7 @@ let value = some_operation().map_err(|e| format!("Failed: {}", e))?;
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| nix | 0.31 (fanotify feature) | Linux fanotify API bindings |
+| nix | 0.31 | Linux syscall bindings (unused, kept for future) |
 | parking_lot | 0.12 | Fast mutex implementation |
 | tracing | 0.1 | Structured logging |
 | tracing-subscriber | 0.3 | Log output formatting |
@@ -131,6 +129,12 @@ The application uses environment variables for configuration:
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `CACHE_WORK_DIR` | Directory to monitor for video files | Yes |
+
+### Logging Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RUST_LOG` | `info` | Log level: `error`, `warn`, `info`, `debug`, `trace` |
 
 ## Testing
 
@@ -159,7 +163,7 @@ When adding new dependencies:
 
 The binary runs in Docker with:
 - Alpine Linux base
-- CAP_SYS_ADMIN capability (required for fanotify)
+- CAP_SYS_ADMIN capability (required for inotify)
 - Mount propagation for watching paths
 
 ### Docker Compose Testing
@@ -185,15 +189,15 @@ docker compose up -d --build
 
 **Services:**
 - `cache-manager` - The main cache manager (monitors /media)
-- `player` - Auto-plays videos to generate fanotify events
+- `player` - Auto-plays videos to generate inotify events
 - `samba` - SMB server for network access to media
 
 ## Common Issues
 
-### Fanotify Initialization Fails
+### Inotify Not Available
 - Ensure running as root or with CAP_SYS_ADMIN
-- Check `/proc/sys/fs/fanotify/max_user_marks` limits
+- Check `/proc/sys/fs/inotify/max_user_watches` limits
 
-### File Not Found After Fanotify Event
+### File Not Found After Event
 - Files may be deleted between event and resolution
 - Always check `path.exists()` before processing
