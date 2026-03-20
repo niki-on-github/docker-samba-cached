@@ -8,6 +8,19 @@ This repository contains a Rust-based media RAM cache manager that uses inotify 
 - **Platform**: Linux-only (inotify API)
 - **Binary**: Static musl build for Alpine Linux/Docker
 
+## Architecture Notes
+
+### IMPORTANT: Fanotify Does NOT Work in Containers
+Fanotify fails with `EINVAL` in Docker/Kubernetes containers due to overlay filesystem limitations.
+**DO NOT attempt to use fanotify** - use inotify only.
+
+### Implementation Details
+- Uses `inotifywait -e close_read` to detect completed video reads
+- `close_read` fires AFTER file is closed, so **do not check `is_file_still_open()`**
+- vmtouch is called immediately on `close_read` event
+- No cooldown mechanism - kernel page cache handles duplicates
+- No byte tracking - any video file read is cached (kernel handles partial reads)
+
 ## Build Commands
 
 ### Local Development (Nix)
@@ -193,6 +206,11 @@ docker compose up -d --build
 
 ## Common Issues
 
+### Fanotify Not Available in Containers
+- Fanotify fails with `EINVAL` on overlay filesystems (Docker/Kubernetes)
+- Use inotify only for container deployments
+- Fanotify may work on bare-metal or VMs with native filesystems
+
 ### Inotify Not Available
 - Ensure running as root or with CAP_SYS_ADMIN
 - Check `/proc/sys/fs/inotify/max_user_watches` limits
@@ -200,3 +218,8 @@ docker compose up -d --build
 ### File Not Found After Event
 - Files may be deleted between event and resolution
 - Always check `path.exists()` before processing
+
+### Event Type Logic
+- Use `open` event if you need to check if file is still open
+- Use `close_read` event if you want to cache after reading is complete
+- **Do NOT** check `is_file_still_open()` with `close_read` - it will always be false
