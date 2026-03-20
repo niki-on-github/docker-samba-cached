@@ -1,12 +1,66 @@
+use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "avi", "ts", "m4v", "mks"];
-const WATCH_DELAY_MS: u64 = 1000;
+const OPEN_TIMEOUT_MS: u64 = 1000;
+
+struct OpenTracker {
+    pending: HashMap<PathBuf, Instant>,
+    timeout: Duration,
+}
+
+impl OpenTracker {
+    fn new(timeout_ms: u64) -> Self {
+        Self {
+            pending: HashMap::new(),
+            timeout: Duration::from_millis(timeout_ms),
+        }
+    }
+
+    fn on_open(&mut self, path: PathBuf) {
+        if !path.exists() {
+            debug!(
+                "[TRACKER] Ignoring open for non-existent file: {}",
+                path.display()
+            );
+            return;
+        }
+
+        self.pending.insert(path.clone(), Instant::now());
+        debug!("[TRACKER] File opened (timer started): {}", path.display());
+    }
+
+    fn on_close(&mut self, path: &Path) {
+        if self.pending.remove(path).is_some() {
+            debug!(
+                "[TRACKER] File closed (timer cancelled): {}",
+                path.display()
+            );
+        }
+    }
+
+    fn get_timed_out(&mut self) -> Vec<PathBuf> {
+        let now = Instant::now();
+        let mut ready = Vec::new();
+
+        self.pending.retain(|path, started| {
+            if now.duration_since(*started) >= self.timeout {
+                ready.push(path.clone());
+                false
+            } else {
+                true
+            }
+        });
+
+        ready
+    }
+}
 
 fn is_video_file(path: &Path) -> bool {
     path.extension()
@@ -15,39 +69,10 @@ fn is_video_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn is_file_still_open(path: &Path) -> bool {
-    let canonical = match path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-
-    let proc_self_fd = PathBuf::from("/proc/self/fd");
-    if let Ok(entries) = std::fs::read_dir(&proc_self_fd) {
-        for entry in entries.flatten() {
-            if let Ok(link) = std::fs::read_link(entry.path()) {
-                if link == canonical {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
 fn cache_file(path: PathBuf) {
     let path_clone = path.clone();
 
     thread::spawn(move || {
-        thread::sleep(Duration::from_millis(WATCH_DELAY_MS));
-
-        if !is_file_still_open(&path_clone) {
-            debug!(
-                "[CACHE] File no longer open, skipping: {}",
-                path_clone.display()
-            );
-            return;
-        }
-
         if !path_clone.exists() {
             debug!(
                 "[CACHE] File no longer exists, skipping: {}",
@@ -74,13 +99,17 @@ fn run_inotify(watch_dir: &Path) {
 
     info!("[INOTIFY] Starting monitoring on: {}", watch_dir.display());
 
+    let tracker = Arc::new(Mutex::new(OpenTracker::new(OPEN_TIMEOUT_MS)));
+
     let mut child = Command::new("inotifywait")
         .args([
             "-m",
             "-e",
             "open",
+            "-e",
+            "close",
             "--format",
-            "%w%f",
+            "%w%f %e",
             "-r",
             watch_dir.to_str().unwrap(),
         ])
@@ -106,18 +135,52 @@ fn run_inotify(watch_dir: &Path) {
         }
     });
 
+    let tracker_clone = Arc::clone(&tracker);
+    let check_handle = thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(100));
+
+        let mut tracker = tracker_clone.lock().unwrap();
+        let timed_out = tracker.get_timed_out();
+        drop(tracker);
+
+        for path in timed_out {
+            cache_file(path);
+        }
+    });
+
     let reader = std::io::BufReader::new(stdout);
 
     for line in reader.lines().map_while(Result::ok) {
-        let path = PathBuf::from(&line);
+        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+
+        let path = PathBuf::from(parts[0].trim_end_matches('/'));
+        let event = parts[1];
 
         if !is_video_file(&path) {
             continue;
         }
 
-        debug!("[INOTIFY] Video file read: {}", path.display());
-        cache_file(path);
+        let mut tracker = tracker.lock().unwrap();
+
+        match event {
+            "OPEN" => {
+                let path_for_debug = path.clone();
+                tracker.on_open(path);
+                debug!("[INOTIFY] Event: {} - {}", event, path_for_debug.display());
+            }
+            "CLOSE_NOWRITE" | "CLOSE_WRITE" => {
+                let path_for_debug = path.clone();
+                tracker.on_close(&path);
+                debug!("[INOTIFY] Event: {} - {}", event, path_for_debug.display());
+            }
+            _ => {}
+        }
     }
+
+    check_handle.join().ok();
 }
 
 fn main() {
