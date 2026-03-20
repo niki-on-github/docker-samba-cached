@@ -6,44 +6,71 @@ if [[ -z "$CACHE_WATCH_DIR" ]]; then
     exit
 fi
 
-MAX_CACHE_FILES=${MAX_CACHE_FILES:-2}
+MAX_CACHE_FILES=${MAX_CACHE_FILES:-3}
 
-# Array to keep track of the LRU queue
-declare -a CACHED_FILES
+# Dynamically set History to be 2 elements larger than Max Cache
+HISTORY_SIZE=$((MAX_CACHE_FILES + 2))
 
-echo "Starting File RAM Cacher on $CACHE_WATCH_DIR..."
+# --- State Management ---
+declare -a CACHE_LIST
 
-# Use process substitution < <(...) to avoid subshell variable issues
+echo "--- Media RAM Cacher Started ---"
+echo "Max RAM Window: $MAX_CACHE_FILES"
+echo "History Buffer: $HISTORY_SIZE"
+echo "Watching: $CACHE_WATCH_DIR"
+
 while read -r FILE
 do
-    # Only react to video files
-    if [[ "$FILE" =~ \.(mkv|mp4|avi)$ ]]; then
+    # 1. Filter for video files
+    if [[ "$FILE" =~ \.(mkv|mp4|avi|ts|m4v)$ ]]; then
         
-        # Check if already in queue
-        ALREADY_CACHED=0
-        for cached in "${CACHED_FILES[@]}"; do
-            if [[ "$cached" == "$FILE" ]]; then
-                ALREADY_CACHED=1
+        # 2. Check if file is already in our tracking list
+        EXISTING_INDEX=-1
+        for i in "${!CACHE_LIST[@]}"; do
+            if [[ "${CACHE_LIST[$i]}" == "$FILE" ]]; then
+                EXISTING_INDEX=$i
                 break
             fi
         done
 
-        if [[ $ALREADY_CACHED -eq 0 ]]; then
-            # IMPORTANT: Add to array BEFORE running vmtouch to prevent recursion loop
-            CACHED_FILES+=("$FILE")
-            echo "New File detected: $FILE. Caching..."
+        # 3. Handle recursion/loop prevention
+        if [[ $EXISTING_INDEX -ne -1 ]]; then
+            # If the file that triggered 'open' is the one we JUST handled 
+            # (last item in array), ignore it to stop vmtouch loop.
+            if [[ $EXISTING_INDEX -eq $((${#CACHE_LIST[@]} - 1)) ]]; then
+                continue
+            fi
             
-            # Cache in background
-            vmtouch -t "$FILE" > /dev/null 2>&1 &
+            # If it's elsewhere in the list, remove it so we can move it 
+            # to the "Most Recently Used" (end) position
+            unset 'CACHE_LIST[$EXISTING_INDEX]'
+            CACHE_LIST=("${CACHE_LIST[@]}") # Re-index array
+        fi
 
-            # LRU Eviction Logic
-            if [[ ${#CACHED_FILES[@]} -gt $MAX_CACHE_FILES ]]; then
-                OLDEST_FILE="${CACHED_FILES[0]}"
-                echo "Cache full. Evicting: $OLDEST_FILE"
-                vmtouch -e "$OLDEST_FILE" > /dev/null 2>&1
-                CACHED_FILES=("${CACHED_FILES[@]:1}")
+        # 4. Add to the end of the list (MRU)
+        CACHE_LIST+=("$FILE")
+        echo "[ACTION] Caching to RAM: $FILE"
+        vmtouch -t "$FILE" > /dev/null 2>&1 &
+
+        # 5. RAM Eviction Logic
+        # If the list is now longer than MAX_CACHE_FILES, the file that was 
+        # pushed out of the "RAM Window" must be evicted from RAM.
+        if [[ ${#CACHE_LIST[@]} -gt $MAX_CACHE_FILES ]]; then
+            # The file to evict is located at (Total Length - MAX - 1)
+            EVICT_IDX=$((${#CACHE_LIST[@]} - MAX_CACHE_FILES - 1))
+            EVICT_FILE="${CACHE_LIST[$EVICT_IDX]}"
+            
+            if [ -f "$EVICT_FILE" ]; then
+                echo "[EVICT] Dropping from RAM (Window exceeded): $EVICT_FILE"
+                vmtouch -e "$EVICT_FILE" > /dev/null 2>&1
             fi
         fi
+
+        # 6. History Trimming
+        # Keep the list size within HISTORY_SIZE
+        if [[ ${#CACHE_LIST[@]} -gt $HISTORY_SIZE ]]; then
+            CACHE_LIST=("${CACHE_LIST[@]:1}")
+        fi
+
     fi
-# Note the syntax change here to fix the subshell issue:
-done < <(inotifywait -m -e open --format "%w%f" -r "$CACHE_WATCH_DIR")
+done < <(inotifywait -m -e open --format "%w%f" -r "$CACHE_WATCH_DIR" 2>/dev/null)
