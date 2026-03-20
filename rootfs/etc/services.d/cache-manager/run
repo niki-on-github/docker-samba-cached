@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/with-contenv bash
 
 if [[ -z "$CACHE_WATCH_DIR" ]]; then
     echo "CACHE_WATCH_DIR is not set. Disable cache."
@@ -14,7 +14,7 @@ declare -a CACHED_FILES
 echo "Starting File RAM Cacher..."
 
 # Listen for 'open' events on files
-inotifywait -m -e open --format "%w%f" -r "$WATCH_DIR" | while read -r FILE
+inotifywait -m -e open --format "%w%f" -r "$CACHE_WATCH_DIR" | while read -r FILE
 do
     # Only react to video files to ignore tiny metadata files
     if [[ "$FILE" =~ \.(mkv|mp4|avi)$ ]]; then
@@ -32,8 +32,7 @@ do
             echo "New File opened: $FILE"
             
             # 1. Force the file into RAM in the background
-            # -t touches it into memory, -b runs it in background so script doesn't hang
-            vmtouch -t -b "$FILE"
+            vmtouch -t "$FILE" &
 
             # 2. Add to our queue
             CACHED_FILES+=("$FILE")
